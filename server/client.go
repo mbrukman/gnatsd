@@ -683,6 +683,7 @@ func (c *client) readLoop() {
 		c.in.bytes = 0
 		c.in.subs = 0
 
+		start := time.Now()
 		// Main call into parser for inbound data. This will generate callouts
 		// to process messages, etc.
 		if err := c.parse(b[:n]); err != nil {
@@ -726,8 +727,13 @@ func (c *client) readLoop() {
 			cp.mu.Unlock()
 			delete(c.pcd, cp)
 		}
+		dur := time.Since(start)
+		if dur >= 3*time.Second {
+			s.Errorf("@@IK: Processing in readloop took: %v for buffer=%s", dur, b[:n])
+		}
 
 		// Update activity, check read buffer size.
+		start = time.Now()
 		c.mu.Lock()
 		nc := c.nc
 
@@ -753,6 +759,10 @@ func (c *client) readLoop() {
 			b = make([]byte, c.in.rsz)
 		}
 		c.mu.Unlock()
+		dur = time.Since(start)
+		if dur >= errThreshold {
+			s.Errorf("@@IK: Updating activity and buffers took: %v", dur)
+		}
 
 		// Check to see if we got closed, e.g. slow consumer
 		if nc == nil {

@@ -1953,6 +1953,13 @@ func (s *Server) gatewayUpdateSubInterest(accName string, sub *subscription, cha
 // subject, etc..
 // <Invoked from any client connection's readLoop>
 func (c *client) sendMsgToGateways(acc *Account, msg, subject, reply []byte, qgroups [][]byte) {
+	start := time.Now()
+	defer func() {
+		dur := time.Since(start)
+		if dur >= 2*time.Second {
+			c.srv.Errorf("@@IK: Sending to gateways took: %v", dur)
+		}
+	}()
 	gwsa := [4]*client{}
 	gws := gwsa[:0]
 	// This is in fast path, so avoid calling function when possible.
@@ -2215,6 +2222,13 @@ func (c *client) gatewayAllSubsReceiveComplete(info *Info) {
 		e.ni = nil
 		e.mode = modeInterestOnly
 		e.Unlock()
+
+		c.mu.Lock()
+		if c.gw != nil {
+			c.Noticef("Switched to interest-only mode for gateway %q, account %q",
+				c.gw.name, string(account))
+		}
+		c.mu.Unlock()
 	}
 }
 
@@ -2246,6 +2260,10 @@ func (c *client) gatewaySwitchAccountToSendAllSubs(e *insie) {
 	// Capture this since we are passing it to a go-routine.
 	account := string(c.pa.account)
 	s := c.srv
+
+	inGWName := c.gw.name
+	c.Noticef("Switching to interest-only mode for incoming gateway %q, account %q",
+		inGWName, account)
 
 	// Function that will create an INFO protocol
 	// and set proper command.
@@ -2284,5 +2302,8 @@ func (c *client) gatewaySwitchAccountToSendAllSubs(e *insie) {
 		// this, it will not send a message unless it has a
 		// matching sub from us.
 		sendCmd(gatewayCmdAllSubsComplete, true)
+
+		c.Noticef("Sent all subscriptions to inbound gateway %q, account %q",
+			inGWName, account)
 	})
 }

@@ -26,6 +26,8 @@ import (
 	"github.com/nats-io/gnatsd/server/pse"
 )
 
+const errThreshold = 500 * time.Millisecond
+
 const (
 	connectEventSubj       = "$SYS.ACCOUNT.%s.CONNECT"
 	disconnectEventSubj    = "$SYS.ACCOUNT.%s.DISCONNECT"
@@ -222,8 +224,13 @@ func (s *Server) internalSendLoop(wg *sync.WaitGroup) {
 			c.pa.reply = []byte(pm.rply)
 			// Add in NL
 			b = append(b, _CRLF_...)
+			start := time.Now()
 			c.processInboundClientMsg(b)
 			c.flushClients()
+			dur := time.Since(start)
+			if dur > errThreshold {
+				s.Errorf("@@IK: Processing for seq=%v took=%v", seq, dur)
+			}
 			// See if we are doing graceful shutdown.
 			if pm.last {
 				return
@@ -261,7 +268,12 @@ func (s *Server) sendInternalMsg(sub, rply string, si *ServerInfo, msg interface
 	sendq := s.sys.sendq
 	// Don't hold lock while placing on the channel.
 	s.mu.Unlock()
+	start := time.Now()
 	sendq <- &pubMsg{sub, rply, si, msg, false}
+	dur := time.Since(start)
+	if dur > errThreshold {
+		s.Errorf("@@IK: Sending to channel for sub=%q took=%v", sub, dur)
+	}
 	s.mu.Lock()
 }
 
@@ -339,7 +351,12 @@ func routeStat(r *client) *RouteStat {
 // Lock should be held.
 func (s *Server) sendStatsz(subj string) {
 	m := ServerStatsMsg{}
+	start := time.Now()
 	updateServerUsage(&m.Stats)
+	dur := time.Since(start)
+	if dur > errThreshold {
+		s.Errorf("@@IK: Getting server usage took %v", dur)
+	}
 	m.Stats.Start = s.start
 	m.Stats.Connections = len(s.clients)
 	m.Stats.TotalConnections = s.totalClients
@@ -356,6 +373,7 @@ func (s *Server) sendStatsz(subj string) {
 	}
 	if s.gateway.enabled {
 		gw := s.gateway
+		start = time.Now()
 		gw.RLock()
 		for name, c := range gw.out {
 			gs := &GatewayStat{Name: name}
@@ -380,6 +398,10 @@ func (s *Server) sendStatsz(subj string) {
 			m.Stats.Gateways = append(m.Stats.Gateways, gs)
 		}
 		gw.RUnlock()
+		dur = time.Since(start)
+		if dur > errThreshold {
+			s.Errorf("@@IK: Collect of GWs took %v", dur)
+		}
 	}
 	s.sendInternalMsg(subj, _EMPTY_, &m.Server, &m)
 }
