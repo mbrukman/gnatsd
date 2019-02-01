@@ -36,6 +36,7 @@ type parseState struct {
 	argBuf  []byte
 	msgBuf  []byte
 	scratch [MAX_CONTROL_LINE_SIZE]byte
+	forgw   bool
 }
 
 // Parser constants
@@ -103,6 +104,8 @@ const (
 	OP_INF
 	OP_INFO
 	INFO_ARG
+	OP_G
+	OP_GS
 )
 
 func (c *client) parse(buf []byte) error {
@@ -148,6 +151,12 @@ func (c *client) parse(buf []byte) error {
 					goto parseErr
 				} else {
 					c.state = OP_A
+				}
+			case 'G', 'g':
+				if c.kind == ROUTER {
+					c.state = OP_G
+				} else {
+					goto parseErr
 				}
 			case 'C', 'c':
 				c.state = OP_C
@@ -394,14 +403,18 @@ func (c *client) parse(buf []byte) error {
 				case CLIENT:
 					err = c.processSub(arg)
 				case ROUTER:
-					err = c.processRemoteSub(arg)
+					if c.forgw {
+						err = c.processGWSubOrUnsub(true, arg)
+					} else {
+						err = c.processRemoteSub(arg)
+					}
 				case GATEWAY:
-					err = c.processGatewayRSub(arg, false)
+					err = c.processGatewayRSub(arg)
 				}
 				if err != nil {
 					return err
 				}
-				c.drop, c.as, c.state = 0, i+1, OP_START
+				c.drop, c.as, c.state, c.forgw = 0, i+1, OP_START, false
 			default:
 				if c.argBuf != nil {
 					c.argBuf = append(c.argBuf, b)
@@ -422,6 +435,24 @@ func (c *client) parse(buf []byte) error {
 				c.state = OP_SUB
 			case '-':
 				c.state = OP_UNSUB
+			default:
+				goto parseErr
+			}
+		case OP_G:
+			switch b {
+			case 'S', 's':
+				c.state = OP_GS
+			default:
+				goto parseErr
+			}
+		case OP_GS:
+			switch b {
+			case '+':
+				c.state = OP_SUB
+				c.forgw = true
+			case '-':
+				c.state = OP_UNSUB
+				c.forgw = true
 			default:
 				goto parseErr
 			}
@@ -486,14 +517,18 @@ func (c *client) parse(buf []byte) error {
 				case CLIENT:
 					err = c.processUnsub(arg)
 				case ROUTER:
-					err = c.processRemoteUnsub(arg)
+					if c.forgw {
+						err = c.processGWSubOrUnsub(false, arg)
+					} else {
+						err = c.processRemoteUnsub(arg)
+					}
 				case GATEWAY:
-					err = c.processGatewayRUnsub(arg, 0)
+					err = c.processGatewayRUnsub(arg)
 				}
 				if err != nil {
 					return err
 				}
-				c.drop, c.as, c.state = 0, i+1, OP_START
+				c.drop, c.as, c.state, c.forgw = 0, i+1, OP_START, false
 			default:
 				if c.argBuf != nil {
 					c.argBuf = append(c.argBuf, b)

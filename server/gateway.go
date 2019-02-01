@@ -1519,23 +1519,32 @@ func (c *client) processGatewayAccountSub(accName string) error {
 // prevent further messages being sent.
 // If in modeInterestOnly or for a queue sub, remove from
 // the sublist if present.
-// <Invoked from outbound connection's readLoop>
-func (c *client) processGatewayRUnsub(arg []byte, cid uint64) error {
-	// Indicate with cid == 0 if we are calling from readLoop.
-	accName, subject, queue, err := c.parseUnsubProto(arg, cid == 0)
+// <Invoked from outbound or inbound connection's readLoop>
+func (c *client) processGatewayRUnsub(arg []byte) error {
+	accName, subject, queue, err := c.parseUnsubProto(arg)
 	if err != nil {
 		return fmt.Errorf("processGatewaySubjectUnsub %s", err.Error())
 	}
 
+	return c.processGWRUnsub(accName, subject, queue, arg)
+}
+
+func (c *client) processGWRUnsub(accName string, subject, queue, arg []byte) error {
 	var e *outsie
 	var useSl, newe bool
 
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if cid != 0 && cid != c.cid {
-		return nil
+	srv := c.srv
+	gwName := c.gw.name
+	if !c.gw.outbound {
+		c.mu.Unlock()
+		c = srv.getOutboundGatewayConnection(gwName)
+		if c == nil {
+			return nil
+		}
+		c.mu.Lock()
 	}
+	defer c.mu.Unlock()
 
 	ei, _ := c.gw.outsim.Load(accName)
 	if ei != nil {
@@ -1564,11 +1573,6 @@ func (c *client) processGatewayRUnsub(arg []byte, cid uint64) error {
 		if !ok {
 			return nil
 		}
-		// If we are trying to remove an implicit sub (cid != 0)
-		// but the current sub stored is not implicit, just return
-		if cid != 0 && !sub.impl {
-			return nil
-		}
 		if e.sl.Remove(sub) == nil {
 			delete(c.subs, string(key))
 			if queue != nil {
@@ -1580,6 +1584,7 @@ func (c *client) processGatewayRUnsub(arg []byte, cid uint64) error {
 			if e.sl.Count() == 0 && e.mode == modeOptimistic && len(e.ni) == 0 {
 				c.gw.outsim.Delete(accName)
 			}
+			defer srv.sendGWSubOrUnsubToRoutes("GS- ", gwName, string(key))
 		}
 	} else {
 		e.ni[string(subject)] = struct{}{}
@@ -1595,16 +1600,12 @@ func (c *client) processGatewayRUnsub(arg []byte, cid uint64) error {
 // this subject (under this account).
 // For queue subs, or if in modeInterestOnly, register interest
 // from remote gateway.
-// <Invoked from outbound connection's readLoop>
-func (c *client) processGatewayRSub(arg []byte, implicit bool) error {
+// <Invoked from outbound or inbound connection's readLoop>
+func (c *client) processGatewayRSub(arg []byte) error {
 	c.traceInOp("RS+", arg)
 
-	// Since this is normally called from the readloop, make sure
-	// we don't access this when `implicit` is true.
-	if !implicit {
-		// Indicate activity.
-		c.in.subs++
-	}
+	// Indicate activity.
+	c.in.subs++
 
 	var (
 		queue []byte
@@ -1620,16 +1621,30 @@ func (c *client) processGatewayRSub(arg []byte, implicit bool) error {
 	default:
 		return fmt.Errorf("processGatewaySubjectSub Parse Error: '%s'", arg)
 	}
-	accName := args[0]
+	accName := string(args[0])
 	subject := args[1]
 
+	return c.processGWRSub(accName, subject, queue, arg, qw)
+}
+
+func (c *client) processGWRSub(accName string, subject, queue, arg []byte, qw int32) error {
 	var e *outsie
 	var useSl, newe bool
 
 	c.mu.Lock()
+	srv := c.srv
+	gwName := c.gw.name
+	if !c.gw.outbound {
+		c.mu.Unlock()
+		c = srv.getOutboundGatewayConnection(gwName)
+		if c == nil {
+			return nil
+		}
+		c.mu.Lock()
+	}
 	defer c.mu.Unlock()
 
-	ei, _ := c.gw.outsim.Load(string(accName))
+	ei, _ := c.gw.outsim.Load(accName)
 	// We should always have an existing entry for plain subs because
 	// in optimistic mode we would have received RS- first, and
 	// in full knowledge, we are receiving RS+ for an account after
@@ -1651,24 +1666,14 @@ func (c *client) processGatewayRSub(arg []byte, implicit bool) error {
 		// We store remote subs by account/subject[/queue].
 		// For queue, remove the trailing weight
 		if queue != nil {
-			key = arg[:len(arg)-len(args[3])-1]
+			key = arg[:len(accName)+1+len(subject)+1+len(queue)]
 		} else {
 			key = arg
 		}
 		// If RS+ for a sub that we already have, ignore.
 		// (m[string()] does not allocate memory)
-		if sub, ok := c.subs[string(key)]; ok {
-			// If we are processing an implicit sub and there is
-			// already any sub with this key, or we are processing
-			// an explicit and the sub is not implicit, return
-			if implicit || !sub.impl {
-				return nil
-			}
-			// Here, we are processing an explicit sub and there
-			// is an implicit stored, remove the implicit to
-			// store the explicit instead.
-			delete(c.subs, string(key))
-			e.sl.Remove(sub)
+		if _, ok := c.subs[string(key)]; ok {
+			return nil
 		}
 		// new subscription. copy subject (and queue) to
 		// not reference the underlying possibly big buffer.
@@ -1685,7 +1690,7 @@ func (c *client) processGatewayRSub(arg []byte, implicit bool) error {
 			csubject = make([]byte, len(subject))
 			copy(csubject, subject)
 		}
-		sub := &subscription{client: c, subject: csubject, queue: cqueue, qw: qw, impl: implicit}
+		sub := &subscription{client: c, subject: csubject, queue: cqueue, qw: qw}
 		// If no error inserting in sublist...
 		if e.sl.Insert(sub) == nil {
 			c.subs[string(key)] = sub
@@ -1695,14 +1700,7 @@ func (c *client) processGatewayRSub(arg []byte, implicit bool) error {
 			if queue != nil {
 				atomic.AddInt64(&c.srv.gateway.totalQSubs, 1)
 			}
-		}
-		if implicit {
-			rUnsubBuf := make([]byte, len(arg))
-			copy(rUnsubBuf, arg)
-			cid := c.cid
-			time.AfterFunc(10*time.Second, func() {
-				c.processGatewayRUnsub(rUnsubBuf, cid)
-			})
+			defer srv.sendGWSubOrUnsubToRoutes("GS+ ", gwName, string(key))
 		}
 	} else {
 		subj := string(subject)
@@ -1720,6 +1718,67 @@ func (c *client) processGatewayRSub(arg []byte, implicit bool) error {
 		}
 	}
 	return nil
+}
+
+func (s *Server) sendGWSubOrUnsubToRoutes(action, gwName, key string) {
+	var bufa [1024]byte
+	buf := bufa[:0]
+
+	buf = append(buf, action...)
+	buf = append(buf, gwName...)
+	buf = append(buf, ' ')
+	buf = append(buf, key...)
+	buf = append(buf, CR_LF...)
+
+	s.mu.Lock()
+	for _, r := range s.routes {
+		r.mu.Lock()
+		r.sendProto(buf, true)
+		r.mu.Unlock()
+	}
+	s.mu.Unlock()
+}
+
+func (c *client) processGWSubOrUnsub(isSub bool, arg []byte) error {
+	if isSub {
+		c.traceInOp("GS+", arg)
+	} else {
+		c.traceInOp("GS-", arg)
+	}
+
+	var queue []byte
+
+	args := splitArg(arg)
+	switch len(args) {
+	case 3:
+	case 4:
+		queue = args[3]
+	default:
+		return fmt.Errorf("processGWSub parse error: '%s'", arg)
+	}
+	gwName := args[0]
+	accName := string(args[1])
+	subject := args[2]
+
+	c.mu.Lock()
+	srv := c.srv
+	c.mu.Unlock()
+	if srv == nil {
+		return nil
+	}
+	outGWc := srv.getOutboundGatewayConnection(string(gwName))
+	if outGWc == nil {
+		return nil
+	}
+	// Skip past the GW name
+	arg = arg[len(gwName)+1:]
+	var err error
+	if isSub {
+		err = outGWc.processGWRSub(accName, subject, queue, arg, 0)
+	} else {
+		err = outGWc.processGWRUnsub(accName, subject, queue, arg)
+	}
+	return err
 }
 
 // Returns true if this gateway has possible interest in the
@@ -1807,14 +1866,15 @@ func (s *Server) endAccountNoInterestForGateways(accName string) {
 // the protocol. In optimistic mode we would send an RS+ only
 // if we had previously sent an RS-. If we are in the send-all-subs
 // mode then the protocol is always sent.
-// <Invoked from outbound connection's readLoop>
+// <Invoked from client/route's readLoop>
 func (s *Server) maybeSendSubOrUnsubToGateways(accName string, sub *subscription, added bool) {
 	if sub.queue != nil {
 		return
 	}
-	gwsa := [4]*client{}
+	gwsa := [16]*client{}
 	gws := gwsa[:0]
 	s.getInboundGatewayConnections(&gws)
+	s.getOutboundGatewayConnections(&gws)
 	if len(gws) == 0 {
 		return
 	}
@@ -1827,27 +1887,31 @@ func (s *Server) maybeSendSubOrUnsubToGateways(accName string, sub *subscription
 	for _, c := range gws {
 		sendProto := false
 		c.mu.Lock()
-		e := c.gw.insim[accName]
-		if e != nil {
-			// If there is a map, need to check if we had sent no-interest.
-			if e.ni != nil {
-				// For wildcard subjects, we will remove from our no-interest
-				// map, all subjects that are a subset of this wc subject, but we
-				// still send the wc subject and let the remote do its own cleanup.
-				if hasWc {
-					for enis := range e.ni {
-						if subjectIsSubsetMatch(enis, subject) {
-							delete(e.ni, enis)
-							sendProto = true
+		if c.gw.outbound {
+			sendProto = true
+		} else {
+			e := c.gw.insim[accName]
+			if e != nil {
+				// If there is a map, need to check if we had sent no-interest.
+				if e.ni != nil {
+					// For wildcard subjects, we will remove from our no-interest
+					// map, all subjects that are a subset of this wc subject, but we
+					// still send the wc subject and let the remote do its own cleanup.
+					if hasWc {
+						for enis := range e.ni {
+							if subjectIsSubsetMatch(enis, subject) {
+								delete(e.ni, enis)
+								sendProto = true
+							}
 						}
+					} else if _, noInterest := e.ni[subject]; noInterest {
+						delete(e.ni, subject)
+						sendProto = true
 					}
-				} else if _, noInterest := e.ni[subject]; noInterest {
-					delete(e.ni, subject)
+				} else if e.mode == modeInterestOnly {
+					// We are in the mode where we always send RS+/- protocols.
 					sendProto = true
 				}
-			} else if e.mode == modeInterestOnly {
-				// We are in the mode where we always send RS+/- protocols.
-				sendProto = true
 			}
 		}
 		if sendProto {
@@ -2203,22 +2267,6 @@ func (c *client) processInboundGatewayMsg(msg []byte) {
 		c.mu.Unlock()
 		if len(r.qsubs) == 0 || len(c.pa.queues) == 0 {
 			return
-		}
-	}
-
-	if len(c.pa.reply) > 0 {
-		c.mu.Lock()
-		gwName := c.gw.name
-		c.mu.Unlock()
-		if outGW := c.srv.getOutboundGatewayConnection(gwName); outGW != nil {
-			var bufa [1024]byte
-			buf := bufa[:0]
-
-			buf = append(buf, []byte(acc.Name)...)
-			buf = append(buf, ' ')
-			buf = append(buf, c.pa.reply...)
-
-			outGW.processGatewayRSub(buf, true)
 		}
 	}
 

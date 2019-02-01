@@ -1425,27 +1425,31 @@ func TestGatewaySubjectInterest(t *testing.T) {
 	// Make sure message is received
 	waitCh(t, ch, "Did not get our message")
 	// Now unsubscribe, there won't be an UNSUB sent to the gateway.
+
+	// With temp fix, an RS- will be sent from s2 outbound to s1
+
 	natsUnsub(t, sub)
 	natsFlush(t, ncb)
 	checkExpectedSubs(t, 0, s2)
 	checkExpectedSubs(t, 0, s1)
 
 	// So now sending a message should go over, but then we should get an RS-
+	// The above comment is not true with the temp fix, so message will not be sent..
 	natsPub(t, nc, "foo", []byte("hello"))
 	natsFlush(t, nc)
-	checkCount(t, gwcb, 3)
+	checkCount(t, gwcb, 2)
 
 	checkNoInterest(t, "foo", true)
 
 	// Send one more time and now it should not go to B
 	natsPub(t, nc, "foo", []byte("hello"))
 	natsFlush(t, nc)
-	checkCount(t, gwcb, 3)
+	checkCount(t, gwcb, 2)
 
 	// Send on bar, message should go over.
 	natsPub(t, nc, "bar", []byte("hello"))
 	natsFlush(t, nc)
-	checkCount(t, gwcb, 4)
+	checkCount(t, gwcb, 3)
 
 	// But now we should have receives an RS- on bar.
 	checkNoInterest(t, "bar", true)
@@ -1462,7 +1466,7 @@ func TestGatewaySubjectInterest(t *testing.T) {
 	natsPub(t, nc, "foo", []byte("hello"))
 	natsPub(t, nc, "bar", []byte("hello"))
 	natsFlush(t, nc)
-	checkCount(t, gwcb, 6)
+	checkCount(t, gwcb, 5)
 
 	// Restart B and that should clear everything on A
 	ncb.Close()
