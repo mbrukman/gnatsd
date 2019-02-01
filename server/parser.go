@@ -396,7 +396,7 @@ func (c *client) parse(buf []byte) error {
 				case ROUTER:
 					err = c.processRemoteSub(arg)
 				case GATEWAY:
-					err = c.processGatewayRSub(arg)
+					err = c.processGatewayRSub(arg, false)
 				}
 				if err != nil {
 					return err
@@ -488,7 +488,7 @@ func (c *client) parse(buf []byte) error {
 				case ROUTER:
 					err = c.processRemoteUnsub(arg)
 				case GATEWAY:
-					err = c.processGatewayRUnsub(arg)
+					err = c.processGatewayRUnsub(arg, 0)
 				}
 				if err != nil {
 					return err

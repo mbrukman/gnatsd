@@ -1520,14 +1520,22 @@ func (c *client) processGatewayAccountSub(accName string) error {
 // If in modeInterestOnly or for a queue sub, remove from
 // the sublist if present.
 // <Invoked from outbound connection's readLoop>
-func (c *client) processGatewayRUnsub(arg []byte) error {
-	accName, subject, queue, err := c.parseUnsubProto(arg)
+func (c *client) processGatewayRUnsub(arg []byte, cid uint64) error {
+	// Indicate with cid == 0 if we are calling from readLoop.
+	accName, subject, queue, err := c.parseUnsubProto(arg, cid == 0)
 	if err != nil {
 		return fmt.Errorf("processGatewaySubjectUnsub %s", err.Error())
 	}
 
 	var e *outsie
 	var useSl, newe bool
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if cid != 0 && cid != c.cid {
+		return nil
+	}
 
 	ei, _ := c.gw.outsim.Load(accName)
 	if ei != nil {
@@ -1550,12 +1558,15 @@ func (c *client) processGatewayRUnsub(arg []byte) error {
 	// the sublist. Look for it and remove.
 	if useSl {
 		key := arg
-		c.mu.Lock()
-		defer c.mu.Unlock()
 		// m[string()] does not cause mem allocation
 		sub, ok := c.subs[string(key)]
 		// if RS- for a sub that we don't have, just ignore.
 		if !ok {
+			return nil
+		}
+		// If we are trying to remove an implicit sub (cid != 0)
+		// but the current sub stored is not implicit, just return
+		if cid != 0 && !sub.impl {
 			return nil
 		}
 		if e.sl.Remove(sub) == nil {
@@ -1585,11 +1596,15 @@ func (c *client) processGatewayRUnsub(arg []byte) error {
 // For queue subs, or if in modeInterestOnly, register interest
 // from remote gateway.
 // <Invoked from outbound connection's readLoop>
-func (c *client) processGatewayRSub(arg []byte) error {
+func (c *client) processGatewayRSub(arg []byte, implicit bool) error {
 	c.traceInOp("RS+", arg)
 
-	// Indicate activity.
-	c.in.subs++
+	// Since this is normally called from the readloop, make sure
+	// we don't access this when `implicit` is true.
+	if !implicit {
+		// Indicate activity.
+		c.in.subs++
+	}
 
 	var (
 		queue []byte
@@ -1610,6 +1625,9 @@ func (c *client) processGatewayRSub(arg []byte) error {
 
 	var e *outsie
 	var useSl, newe bool
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
 	ei, _ := c.gw.outsim.Load(string(accName))
 	// We should always have an existing entry for plain subs because
@@ -1637,12 +1655,20 @@ func (c *client) processGatewayRSub(arg []byte) error {
 		} else {
 			key = arg
 		}
-		c.mu.Lock()
-		defer c.mu.Unlock()
 		// If RS+ for a sub that we already have, ignore.
 		// (m[string()] does not allocate memory)
-		if _, ok := c.subs[string(key)]; ok {
-			return nil
+		if sub, ok := c.subs[string(key)]; ok {
+			// If we are processing an implicit sub and there is
+			// already any sub with this key, or we are processing
+			// an explicit and the sub is not implicit, return
+			if implicit || !sub.impl {
+				return nil
+			}
+			// Here, we are processing an explicit sub and there
+			// is an implicit stored, remove the implicit to
+			// store the explicit instead.
+			delete(c.subs, string(key))
+			e.sl.Remove(sub)
 		}
 		// new subscription. copy subject (and queue) to
 		// not reference the underlying possibly big buffer.
@@ -1659,7 +1685,7 @@ func (c *client) processGatewayRSub(arg []byte) error {
 			csubject = make([]byte, len(subject))
 			copy(csubject, subject)
 		}
-		sub := &subscription{client: c, subject: csubject, queue: cqueue, qw: qw}
+		sub := &subscription{client: c, subject: csubject, queue: cqueue, qw: qw, impl: implicit}
 		// If no error inserting in sublist...
 		if e.sl.Insert(sub) == nil {
 			c.subs[string(key)] = sub
@@ -1669,6 +1695,14 @@ func (c *client) processGatewayRSub(arg []byte) error {
 			if queue != nil {
 				atomic.AddInt64(&c.srv.gateway.totalQSubs, 1)
 			}
+		}
+		if implicit {
+			rUnsubBuf := make([]byte, len(arg))
+			copy(rUnsubBuf, arg)
+			cid := c.cid
+			time.AfterFunc(10*time.Second, func() {
+				c.processGatewayRUnsub(rUnsubBuf, cid)
+			})
 		}
 	} else {
 		subj := string(subject)
@@ -2169,6 +2203,22 @@ func (c *client) processInboundGatewayMsg(msg []byte) {
 		c.mu.Unlock()
 		if len(r.qsubs) == 0 || len(c.pa.queues) == 0 {
 			return
+		}
+	}
+
+	if len(c.pa.reply) > 0 {
+		c.mu.Lock()
+		gwName := c.gw.name
+		c.mu.Unlock()
+		if outGW := c.srv.getOutboundGatewayConnection(gwName); outGW != nil {
+			var bufa [1024]byte
+			buf := bufa[:0]
+
+			buf = append(buf, []byte(acc.Name)...)
+			buf = append(buf, ' ')
+			buf = append(buf, c.pa.reply...)
+
+			outGW.processGatewayRSub(buf, true)
 		}
 	}
 

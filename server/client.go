@@ -309,6 +309,7 @@ type subscription struct {
 	nm      int64
 	max     int64
 	qw      int32
+	impl    bool
 }
 
 type clientOpts struct {
@@ -631,7 +632,10 @@ func (c *client) writeLoop() {
 		c.mu.Lock()
 		if waitOk && (c.out.pb == 0 || c.out.fsp > 0) && len(c.out.nb) == 0 && !c.flags.isSet(clearConnection) {
 			// Wait on pending data.
-			c.out.sg.Wait()
+			// c.out.sg.Wait()
+			c.mu.Unlock()
+			time.Sleep(10 * time.Millisecond)
+			c.mu.Lock()
 		}
 		// Flush data
 		waitOk = c.flushOutbound()
@@ -933,7 +937,7 @@ func (c *client) flushOutbound() bool {
 // flushSignal will use server to queue the flush IO operation to a pool of flushers.
 // Lock must be held.
 func (c *client) flushSignal() {
-	c.out.sg.Signal()
+	// c.out.sg.Signal()
 }
 
 func (c *client) traceMsg(msg []byte) {

@@ -692,11 +692,13 @@ func (c *client) removeRemoteSubs() {
 	}
 }
 
-func (c *client) parseUnsubProto(arg []byte) (string, []byte, []byte, error) {
+func (c *client) parseUnsubProto(arg []byte, fromReadLoop bool) (string, []byte, []byte, error) {
 	c.traceInOp("RS-", arg)
 
-	// Indicate any activity, so pub and sub or unsubs.
-	c.in.subs++
+	if fromReadLoop {
+		// Indicate any activity, so pub and sub or unsubs.
+		c.in.subs++
+	}
 
 	args := splitArg(arg)
 	var (
@@ -722,7 +724,7 @@ func (c *client) processRemoteUnsub(arg []byte) (err error) {
 	if srv == nil {
 		return nil
 	}
-	accountName, subject, _, err := c.parseUnsubProto(arg)
+	accountName, subject, _, err := c.parseUnsubProto(arg, true)
 	if err != nil {
 		return fmt.Errorf("processRemoteUnsub %s", err.Error())
 	}

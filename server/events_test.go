@@ -678,6 +678,8 @@ func TestSystemAccountConnectionLimitsServersStaggered(t *testing.T) {
 	// to request this account, hence the connection will succeed.
 	sb.LookupAccount(pub)
 
+	time.Sleep(100 * time.Millisecond)
+
 	// Expect this to fail.
 	urlB := fmt.Sprintf("nats://%s:%d", optsB.Host, optsB.Port)
 	if _, err := nats.Connect(urlB, createUserCreds(t, sb, akp)); err == nil {
