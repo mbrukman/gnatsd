@@ -1630,10 +1630,20 @@ func (c *client) processGatewayRSub(arg []byte) error {
 func (c *client) processGWRSub(accName string, subject, queue, arg []byte, qw int32) error {
 	var e *outsie
 	var useSl, newe bool
+	var srv *Server
+	var gwName string
+	var send bool
+	var proto string
+
+	defer func() {
+		if send {
+			srv.sendGWSubOrUnsubToRoutes("GS+ ", gwName, proto)
+		}
+	}()
 
 	c.mu.Lock()
-	srv := c.srv
-	gwName := c.gw.name
+	srv = c.srv
+	gwName = c.gw.name
 	if !c.gw.outbound {
 		c.mu.Unlock()
 		c = srv.getOutboundGatewayConnection(gwName)
@@ -1700,7 +1710,8 @@ func (c *client) processGWRSub(accName string, subject, queue, arg []byte, qw in
 			if queue != nil {
 				atomic.AddInt64(&c.srv.gateway.totalQSubs, 1)
 			}
-			defer srv.sendGWSubOrUnsubToRoutes("GS+ ", gwName, string(key))
+			proto = string(key)
+			send = true
 		}
 	} else {
 		subj := string(subject)

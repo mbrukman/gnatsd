@@ -194,14 +194,15 @@ type pinfo struct {
 
 // outbound holds pending data for a socket.
 type outbound struct {
-	p   []byte        // Primary write buffer
-	s   []byte        // Secondary for use post flush
-	nb  net.Buffers   // net.Buffers for writev IO
-	sz  int           // limit size per []byte, uses variable BufSize constants, start, min, max.
-	sws int           // Number of short writes, used for dynamic resizing.
-	pb  int64         // Total pending/queued bytes.
-	pm  int64         // Total pending/queued messages.
-	sg  *sync.Cond    // Flusher conditional for signaling.
+	p   []byte      // Primary write buffer
+	s   []byte      // Secondary for use post flush
+	nb  net.Buffers // net.Buffers for writev IO
+	sz  int         // limit size per []byte, uses variable BufSize constants, start, min, max.
+	sws int         // Number of short writes, used for dynamic resizing.
+	pb  int64       // Total pending/queued bytes.
+	pm  int64       // Total pending/queued messages.
+	// sg  *sync.Cond    // Flusher conditional for signaling.
+	sg  chan struct{}
 	wdl time.Duration // Snapshot fo write deadline.
 	mp  int64         // snapshot of max pending.
 	fsp int           // Flush signals that are pending from readLoop's pcd.
@@ -348,7 +349,8 @@ func (c *client) initClient() {
 
 	// Outbound data structure setup
 	c.out.sz = startBufSize
-	c.out.sg = sync.NewCond(&c.mu)
+	// c.out.sg = sync.NewCond(&c.mu)
+	c.out.sg = make(chan struct{}, 1)
 	opts := s.getOpts()
 	// Snapshots to avoid mutex access in fast paths.
 	c.out.wdl = opts.WriteDeadline
@@ -625,6 +627,10 @@ func (c *client) writeLoop() {
 	// Used to check that we did flush from last wake up.
 	waitOk := true
 
+	c.mu.Lock()
+	sg := c.out.sg
+	c.mu.Unlock()
+
 	// Main loop. Will wait to be signaled and then will use
 	// buffered outbound structure for efficient writev to the underlying socket.
 	for {
@@ -633,7 +639,10 @@ func (c *client) writeLoop() {
 			// Wait on pending data.
 			// c.out.sg.Wait()
 			c.mu.Unlock()
-			time.Sleep(10 * time.Millisecond)
+			select {
+			case <-sg:
+			case <-time.After(10 * time.Millisecond):
+			}
 			c.mu.Lock()
 		}
 		// Flush data
@@ -937,6 +946,10 @@ func (c *client) flushOutbound() bool {
 // Lock must be held.
 func (c *client) flushSignal() {
 	// c.out.sg.Signal()
+	select {
+	case c.out.sg <- struct{}{}:
+	default:
+	}
 }
 
 func (c *client) traceMsg(msg []byte) {
@@ -2573,7 +2586,8 @@ func (c *client) clearConnection(reason ClosedState) {
 
 	// Clear outbound here.
 	if c.out.sg != nil {
-		c.out.sg.Broadcast()
+		// c.out.sg.Broadcast()
+		c.flushSignal()
 	}
 
 	// With TLS, Close() is sending an alert (that is doing a write).
