@@ -833,7 +833,8 @@ func (c *client) flushOutbound() bool {
 	// our own. How we attempt to get back into a more balanced state under
 	// load will be to hold our lock during IO, forcing others to wait and
 	// applying back pressure to the publishers sending to us.
-	releaseLock := c.out.pb < maxBufSize*4
+	// releaseLock := c.out.pb < maxBufSize*4
+	releaseLock := false
 
 	// Do NOT hold lock during actual IO unless we are behind
 	if releaseLock {

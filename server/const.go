@@ -40,7 +40,7 @@ var (
 
 const (
 	// VERSION is the current version for the server.
-	VERSION = "2.0.0-RC3"
+	VERSION = "2.0.0-20190208-1"
 
 	// PROTO is the currently supported protocol.
 	// 0 was the original
