@@ -61,6 +61,7 @@ const (
 	minBufSize     = 64    // Smallest to shrink to for PING/PONG
 	maxBufSize     = 65536 // 64k
 	shortsToShrink = 2
+	fanInThreshold = 1024 * 1024 // 1MB
 )
 
 // Represent client booleans with a bitmask
@@ -587,7 +588,7 @@ func (c *client) flushOutbound() bool {
 	// our own. How we attempt to get back into a more balanced state under
 	// load will be to hold our lock during IO, forcing others to wait and
 	// applying back pressure to the publishers sending to us.
-	releaseLock := c.out.pb < maxBufSize*4
+	releaseLock := c.out.pb < fanInThreshold
 
 	// Do NOT hold lock during actual IO unless we are behind
 	if releaseLock {
@@ -1843,7 +1844,12 @@ func (c *client) closeConnection(reason ClosedState) {
 		return
 	}
 
-	c.Debugf("%s connection closed", c.typeString())
+	// ROUTER print the route created as Noticef, so do same for close.
+	if c.typ == ROUTER {
+		c.Noticef("%s connection closed", c.typeString())
+	} else {
+		c.Debugf("%s connection closed", c.typeString())
+	}
 
 	c.clearAuthTimer()
 	c.clearPingTimer()

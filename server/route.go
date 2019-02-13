@@ -369,7 +369,10 @@ func (c *client) processRouteInfo(info *Info) {
 	if added, sendInfo := s.addRoute(c, info); added {
 		c.Debugf("Registering remote route %q", info.ID)
 		// Send our local subscriptions to this route.
-		s.sendLocalSubsToRoute(c)
+		s.startGoRoutine(func() {
+			s.sendLocalSubsToRoute(c)
+			s.grWG.Done()
+		})
 		// sendInfo will be false if the route that we just accepted
 		// is the only route there is.
 		if sendInfo {
@@ -584,9 +587,12 @@ func (s *Server) sendLocalSubsToRoute(route *client) {
 	var raw [4096]*subscription
 	subs := raw[:0]
 
-	s.sl.localSubs(&subs)
+	closed := false
+	threshold := int64(fanInThreshold / 2)
 
 	route.mu.Lock()
+	s.sl.localSubs(&subs)
+	route.Noticef("Sending %v local subscriptions to route", len(subs))
 	for _, sub := range subs {
 		// Send SUB interest only if subject has a match in import permissions
 		if !route.canImport(sub.subject) {
@@ -594,14 +600,19 @@ func (s *Server) sendLocalSubsToRoute(route *client) {
 		}
 		proto := fmt.Sprintf(subProto, sub.subject, sub.queue, routeSid(sub))
 		route.queueOutbound([]byte(proto))
-		if route.out.pb > int64(route.out.sz*2) {
-			route.flushSignal()
+		if route.out.pb > threshold {
+			route.flushOutbound()
+			if closed = route.flags.isSet(clearConnection); closed {
+				break
+			}
 		}
 	}
 	route.flushSignal()
 	route.mu.Unlock()
 
-	route.Debugf("Sent local subscriptions to route")
+	if !closed {
+		route.Noticef("Sent local subscriptions to route")
+	}
 }
 
 func (s *Server) createRoute(conn net.Conn, rURL *url.URL) *client {
